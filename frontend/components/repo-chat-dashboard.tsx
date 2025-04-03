@@ -1,11 +1,14 @@
 "use client"
 
-import { useState, useEffect} from "react"
+import { useState, useEffect } from "react"
 import { Github, ArrowRight, FileText } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import ReactMarkdown from 'react-markdown'
+
+// Modal API URL - update this to your local development URL
+const MODAL_API_URL = "http://localhost:8000";
 
 async function cleanLogWithGPT4Mini(logData: string): Promise<string> {
   try {
