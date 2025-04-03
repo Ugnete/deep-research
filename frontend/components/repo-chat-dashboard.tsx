@@ -7,6 +7,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import ReactMarkdown from 'react-markdown'
 
+const MODAL_API_URL = "https://zeeeepa--code-research-app-fastapi-modal-app-dev.modal.run";
+
 async function cleanLogWithGPT4Mini(logData: string): Promise<string> {
   try {
     const response = await fetch('/api/clean-log', {
@@ -83,7 +85,7 @@ export default function RepoChatDashboard() {
       if (question) {
         setLogs(prev => [...prev, "Looking through files"]);
         
-        const response = await fetch('https://codegen-sh--code-research-app-fastapi-modal-app.modal.run/research/stream', {
+        const response = await fetch(`${MODAL_API_URL}/research/stream`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
