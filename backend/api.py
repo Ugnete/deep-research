@@ -18,6 +18,14 @@ from typing import List
 from fastapi.responses import StreamingResponse
 import json
 
+# Add environment variable handling for model configuration
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+OPENAI_API_ENDPOINT = os.environ.get("OPENAI_API_ENDPOINT")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-3-7-sonnet-20250219")
+
+# Modal image configuration
 image = (
     modal.Image.debian_slim()
     .apt_install("git")
@@ -27,6 +35,7 @@ image = (
         "uvicorn",
         "langchain",
         "langchain-core",
+        "langchain-anthropic",  # Add Anthropic integration
         "pydantic",
     )
 )
@@ -126,6 +135,10 @@ async def research(request: ResearchRequest) -> ResearchResponse:
             tools=tools,
             chat_history=[SystemMessage(content=RESEARCH_AGENT_PROMPT)],
             verbose=True,
+            # Configure to use Anthropic by default, with fallback to OpenAI compatible API
+            model_provider="anthropic" if ANTHROPIC_API_KEY else "openai",
+            model_name=ANTHROPIC_MODEL if ANTHROPIC_API_KEY else OPENAI_MODEL,
+            openai_api_base=OPENAI_API_ENDPOINT,  # Will be used if OpenAI compatible API is selected
         )
 
         update_status("Running analysis...")
@@ -200,6 +213,10 @@ async def research_stream(request: ResearchRequest):
                 tools=tools,
                 chat_history=[SystemMessage(content=RESEARCH_AGENT_PROMPT)],
                 verbose=True,
+                # Configure to use Anthropic by default, with fallback to OpenAI compatible API
+                model_provider="anthropic" if ANTHROPIC_API_KEY else "openai",
+                model_name=ANTHROPIC_MODEL if ANTHROPIC_API_KEY else OPENAI_MODEL,
+                openai_api_base=OPENAI_API_ENDPOINT,  # Will be used if OpenAI compatible API is selected
             )
 
             research_task = agent.astream_events(
