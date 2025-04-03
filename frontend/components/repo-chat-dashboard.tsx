@@ -1,31 +1,31 @@
 "use client"
 
-import { useState, useEffect} from "react"
+import { useState, useEffect } from "react"
 import { Github, ArrowRight, FileText } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import ReactMarkdown from 'react-markdown'
 
-async function cleanLogWithGPT4Mini(logData: string): Promise<string> {
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+function formatToolEvent(eventData) {
+  if (!eventData) return "Tool event data missing";
+  
   try {
-    const response = await fetch('/api/clean-log', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ logData }),
-    });
-
-    if (!response.ok) {
-      throw new Error('Failed to clean log');
+    const { name, input, output } = eventData;
+    if (name && input) {
+      return `Using tool: ${name} with input: ${typeof input === 'string' ? input : JSON.stringify(input)}`;
+    } else if (name && output) {
+      const displayOutput = typeof output === 'string' && output.length > 150 
+        ? output.substring(0, 150) + "..." 
+        : output;
+      return `Tool ${name} returned: ${typeof displayOutput === 'string' ? displayOutput : JSON.stringify(displayOutput)}`;
     }
-
-    const data = await response.json();
-    return data.content || logData;
-  } catch (error) {
-    console.error('Error cleaning log:', error);
-    return logData;
+    return JSON.stringify(eventData);
+  } catch (e) {
+    console.error('Error formatting tool event:', e);
+    return JSON.stringify(eventData);
   }
 }
 
@@ -39,6 +39,7 @@ export default function RepoChatDashboard() {
   const [isTransitioning, setIsTransitioning] = useState(false)
   const [logs, setLogs] = useState<string[]>([])
   const [similarFiles, setSimilarFiles] = useState<string[]>([])
+  const [errorMessage, setErrorMessage] = useState<string>("")
 
   useEffect(() => {
     if (repoUrl) {
@@ -48,23 +49,38 @@ export default function RepoChatDashboard() {
     }
   }, [repoUrl])
 
-
   const parseRepoUrl = (input: string): string => {
-    if (input.includes('github.com')) {
-      const url = new URL(input)
-      const pathParts = url.pathname.split('/').filter(Boolean)
-      if (pathParts.length >= 2) {
-        return `${pathParts[0]}/${pathParts[1]}`
+    try {
+      if (input.includes('github.com')) {
+        const url = new URL(input)
+        const pathParts = url.pathname.split('/').filter(Boolean)
+        if (pathParts.length >= 2) {
+          return `${pathParts[0]}/${pathParts[1]}`
+        }
       }
+      if (input.includes('/') && !input.includes(' ')) {
+        const parts = input.split('/')
+        if (parts.length === 2) {
+          return input
+        }
+      }
+    } catch (e) {
+      console.error('Error parsing URL:', e)
     }
     return input
   }
 
   const handleSubmit = async () => {
     if (!repoUrl) {
-      alert('Please enter a repository URL');
+      setErrorMessage('Please enter a repository URL');
       return;
     }
+    if (!question) {
+      setErrorMessage('Please enter a question about the codebase');
+      return;
+    }
+    
+    setErrorMessage("");
     setIsLoading(true);
     setIsLandingPage(false);
     setResearchResult("");
@@ -79,78 +95,89 @@ export default function RepoChatDashboard() {
     
     try {
       const parsedRepoUrl = parseRepoUrl(repoUrl);
+      
+      setLogs(prev => [...prev, "Looking through files"]);
+      
+      const response = await fetch(`${API_URL}/research/stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          repo_name: parsedRepoUrl,
+          query: question
+        })
+      });
 
-      if (question) {
-        setLogs(prev => [...prev, "Looking through files"]);
-        
-        const response = await fetch('https://codegen-sh--code-research-app-fastapi-modal-app.modal.run/research/stream', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            repo_name: parsedRepoUrl,
-            query: question
-          })
-        });
+      if (!response.ok) {
+        throw new Error(`Failed to fetch research results: ${response.status}`);
+      }
 
-        if (!response.ok) {
-          throw new Error('Failed to fetch research results');
-        }
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('Failed to get response reader');
+      }
 
-        const reader = response.body?.getReader();
-        const decoder = new TextDecoder();
-        let partialLine = '';
+      const decoder = new TextDecoder();
+      let partialLine = '';
 
-        if (!reader) {
-          throw new Error('Failed to get response reader');
-        }
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
 
-        try {
-          while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
+          const chunk = partialLine + decoder.decode(value, { stream: true });
+          const lines = chunk.split('\n');
+          
+          partialLine = lines[lines.length - 1];
 
-            const chunk = partialLine + decoder.decode(value, { stream: true });
-            const lines = chunk.split('\n');
-            
-            partialLine = lines[lines.length - 1];
-
-            for (let i = 0; i < lines.length - 1; i++) {
-              const line = lines[i].trim();
-              if (line.startsWith('data: ')) {
-                try {
-                  const eventData = JSON.parse(line.slice(6));
-                  if (eventData.type === 'similar_files') {
+          for (let i = 0; i < lines.length - 1; i++) {
+            const line = lines[i].trim();
+            if (line.startsWith('data: ')) {
+              try {
+                const eventData = JSON.parse(line.slice(6));
+                switch (eventData.type) {
+                  case 'similar_files':
                     setSimilarFiles(eventData.content);
                     setLogs(prev => [...prev, "Starting agent run"]);
-                  } else if (eventData.type === 'content') {
+                    break;
+                  case 'status':
+                    setLogs(prev => [...prev, eventData.content]);
+                    break;
+                  case 'content':
                     setResearchResult(prev => prev + eventData.content);
-                  } else if (eventData.type === 'error') {
+                    break;
+                  case 'error':
                     setResearchResult(`Error: ${eventData.content}`);
+                    setErrorMessage(`Error: ${eventData.content}`);
                     setIsLoading(false);
                     return;
-                  } else if (eventData.type === 'complete') {
+                  case 'complete':
                     setResearchResult(eventData.content);
-                    setIsLoading(false);
                     setLogs(prev => [...prev, "Analysis complete"]);
+                    setIsLoading(false);
                     return;
-                  } else if (['on_tool_start', 'on_tool_end'].includes(eventData.type)) {
-                    const cleanedLog = await cleanLogWithGPT4Mini(JSON.stringify(eventData.data));
-                    setLogs(prev => [...prev, cleanedLog]);
-                  }
-                } catch (e) {
-                  console.error('Error parsing event:', e, line);
+                  case 'on_tool_start':
+                    setLogs(prev => [...prev, formatToolEvent(eventData.data)]);
+                    break;
+                  case 'on_tool_end':
+                    setLogs(prev => [...prev, formatToolEvent(eventData.data)]);
+                    break;
+                  default:
+                    console.log('Unknown event type:', eventData.type);
                 }
+              } catch (e) {
+                console.error('Error parsing event:', e, line);
               }
             }
           }
-        } finally {
-          reader.releaseLock();
         }
+      } finally {
+        reader.releaseLock();
       }
     } catch (error) {
       console.error('Error:', error);
+      setErrorMessage(error.message || "Failed to process request. Please try again.");
       setResearchResult("Error: Failed to process request. Please try again.");
     } finally {
       setIsLoading(false);
@@ -161,6 +188,11 @@ export default function RepoChatDashboard() {
     if (e.key === 'Enter') {
       handleSubmit();
     }
+  }
+
+  const resetSearch = () => {
+    setIsLandingPage(true);
+    setErrorMessage("");
   }
 
   return (
@@ -201,13 +233,16 @@ export default function RepoChatDashboard() {
                 value={question}
                 onChange={(e) => setQuestion(e.target.value)}
                 onKeyPress={handleKeyPress}
-                 className="flex-1 h-25 text-lg px-4 mb-2 bg-[#050505] text-muted-foreground"
+                className="flex-1 h-25 text-lg px-4 mb-2 bg-[#050505] text-muted-foreground"
               />
             </div>
+            {errorMessage && (
+              <div className="text-red-500 text-sm mt-1 mb-2">{errorMessage}</div>
+            )}
             <div className="flex justify-center">
               <Button 
                 onClick={handleSubmit} 
-                disabled={isLoading || !repoUrl || !question}
+                disabled={isLoading}
                 className="w-32 mt-5"
               >
                 <span className="font-semibold flex items-center gap-2">
@@ -228,12 +263,12 @@ export default function RepoChatDashboard() {
           <div className="flex items-center justify-between space-x-4">
             <div 
               className="flex items-center gap-3 cursor-pointer hover:opacity-80" 
-              onClick={() => setIsLandingPage(true)}
+              onClick={resetSearch}
             >
               <img src="cg.png" alt="CG Logo" className="h-8 w-8" />
               <h2 className="text-3xl font-bold tracking-tight">Deep Research</h2>
             </div>
-            <Button onClick={() => setIsLandingPage(true)}>
+            <Button onClick={resetSearch}>
               <span className="font-semibold">New Search</span>
             </Button>
           </div>
@@ -256,6 +291,18 @@ export default function RepoChatDashboard() {
               </CardHeader>
               <CardContent>
                 <div className="space-y-6">
+                  {isLoading && !researchResult && (
+                    <div className="animate-pulse flex space-x-4">
+                      <div className="flex-1 space-y-4 py-1">
+                        <div className="h-4 bg-muted/50 rounded w-3/4"></div>
+                        <div className="space-y-2">
+                          <div className="h-4 bg-muted/50 rounded"></div>
+                          <div className="h-4 bg-muted/50 rounded w-5/6"></div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  
                   {researchResult && (
                     <div className="space-y-3 animate-in fade-in slide-in-from-bottom-2 duration-500">
                       <Card className="bg-muted/25 border-none rounded-xl">
@@ -266,7 +313,7 @@ export default function RepoChatDashboard() {
                     </div>
                   )}
 
-                  {researchResult && (
+                  {(researchResult || isLoading) && (
                     <div className="space-y-3">
                       <h3 className="text-lg font-semibold">Relevant Files</h3>
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -305,16 +352,9 @@ export default function RepoChatDashboard() {
                             );
                           })
                         ) : (
-                          Array(6).fill(0).map((_, i) => (
-                            <Card 
-                              key={i}
-                              className="p-4 flex flex-col justify-between bg-muted/25 border-none hover:bg-muted transition-colors cursor-pointer rounded-xl"
-                            >
-                              <div className="flex items-center gap-2">
-                                <p className="text-sm font-medium text-muted-foreground">Example file {i + 1}</p>
-                              </div>
-                            </Card>
-                          ))
+                          <div className="col-span-3 text-center text-muted-foreground py-4">
+                            No relevant files found.
+                          </div>
                         )}
                       </div>
                     </div>
@@ -322,28 +362,34 @@ export default function RepoChatDashboard() {
 
                   <div className="space-y-3">
                     <h3 className="text-lg font-semibold">Agent Logs</h3>
-                    <div className="space-y-2">
-                      {logs.map((log, index) => (
-                        <div 
-                          key={index} 
-                          className="flex items-center gap-2 text-sm text-muted-foreground slide-in-from-bottom-2"
-                          style={{ animationDelay: `${index * 150}ms` }}
-                        >
-                          {index === logs.length - 1 && isLoading ? (
-                            <img 
-                              src="cg.png" 
-                              alt="CG Logo" 
-                              className="h-4 w-4 animate-spin"
-                              style={{ animationDuration: '0.5s' }}
-                            />
-                          ) : (
-                            <div className="flex items-center">
-                              <span>→</span>
-                            </div>
-                          )}
-                          {log}
+                    <div className="space-y-2 max-h-[300px] overflow-y-auto p-2 bg-muted/10 rounded-xl">
+                      {logs.length > 0 ? (
+                        logs.map((log, index) => (
+                          <div 
+                            key={index} 
+                            className="flex items-start gap-2 text-sm text-muted-foreground slide-in-from-bottom-2 p-2 border-b border-muted/20 last:border-0"
+                            style={{ animationDelay: `${index * 150}ms` }}
+                          >
+                            {index === logs.length - 1 && isLoading ? (
+                              <img 
+                                src="cg.png" 
+                                alt="CG Logo" 
+                                className="h-4 w-4 animate-spin mt-1"
+                                style={{ animationDuration: '0.5s' }}
+                              />
+                            ) : (
+                              <div className="flex items-center mt-1">
+                                <span>→</span>
+                              </div>
+                            )}
+                            <div className="flex-1">{log}</div>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="text-center text-muted-foreground py-4">
+                          {isLoading ? "Waiting for logs..." : "No logs available."}
                         </div>
-                      ))}
+                      )}
                     </div>
                   </div>
                 </div>
